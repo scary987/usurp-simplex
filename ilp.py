@@ -1,184 +1,295 @@
-import math
+import gurobipy as gp
+from gurobipy import GRB
 import pandas as pd
 
 
 # ============================================================
-# G(T, K_pure + 6)
-#
-# T = n / 4
-# K_total = K_pure + 6
-#
-# K_pure = 3, 4, 5, 6
-# K_total = 9, 10, 11, 12
+# G(T, K)
 # ============================================================
 
-
-###
-# G is the expected amount of Gates drawn
-###
 G = {
-    0: {9: 0.000, 10: 0.000, 11: 0.000, 12: 0.000},
+   # 0: {9: 0.000, 10: 0.000, 11: 0.000, 12: 0.000},
 
-    1: {9: 0.600, 10: 0.667, 11: 0.733, 12: 0.800},
-    2: {9: 1.200, 10: 1.333, 11: 1.467, 12: 1.600},
-    3: {9: 1.800, 10: 2.000, 11: 2.200, 12: 2.400},
-    4: {9: 2.400, 10: 2.667, 11: 2.933, 12: 3.200},
-    5: {9: 3.000, 10: 3.333, 11: 3.667, 12: 4.000},
-    6: {9: 3.600, 10: 4.000, 11: 4.400, 12: 4.800},
+    1: {9: 0.600, 10: 0.667, 11: 0.733, 12: 0.800, 6:0.400},
+    2: {9: 1.200, 10: 1.333, 11: 1.467, 12: 1.600, 6:0.800},
+    3: {9: 1.800, 10: 2.000, 11: 2.200, 12: 2.400, 6:1.200},
+    4: {9: 2.400, 10: 2.667, 11: 2.933, 12: 3.200, 6:1.600},
+    5: {9: 3.000, 10: 3.333, 11: 3.667, 12: 4.000, 6:2.000},
+    6: {9: 3.600, 10: 4.000, 11: 4.400, 12: 4.800, 6:2.400},
 }
 
 
 # ============================================================
-# Constants
+# Settings
 # ============================================================
 
-TOTAL_PURE = 51
-SHARED_PER_GROUP = 6
+T_VALUES = range(1,7)
 
-MIN_K_PURE = 3
-MAX_K_PURE = 6
+BD_PURE_VALUES = range(20, 31)
 
-MAX_RC_PURE = 19
-
-T_VALUES = range(7)
+K_VALUES = [0, 3, 4, 5, 6]
 
 
 # ============================================================
-# Calculate the best solution for one T
+# Solve one Gurobi model
+#
+# T and BD_pure are fixed.
+# Gurobi chooses:
+#   RC_pure
+#   K_pure
+#   X
 # ============================================================
 
-def optimize_for_T(T):
+def solve_model(T, BD_pure):
 
-    best = None
+    model = gp.Model(f"T{T}_BD{BD_pure}")
 
     # --------------------------------------------------------
-    # Enumerate K_pure
+    # Variables
     # --------------------------------------------------------
 
-    for K_pure in range(MIN_K_PURE, MAX_K_PURE + 1):
+    RC_pure = model.addVar(
+        vtype=GRB.INTEGER,
+        lb=0,
+        ub=19,
+        name="RC_pure"
+    )
 
-        K = K_pure + SHARED_PER_GROUP
+    K_pure = model.addVar(
+        vtype=GRB.INTEGER,
+        lb=3,
+        ub=6,
+        name="K_pure"
+    )
 
-        # ----------------------------------------------------
-        # Enumerate RC_pure
-        # ----------------------------------------------------
+    X = model.addVar(
+        vtype=GRB.INTEGER,
+        lb=0,
+        name="X"
+    )
 
-        for RC_pure in range(MAX_RC_PURE + 1):
+    # Binary selector variables
+    z = {
+        k: model.addVar(
+            vtype=GRB.BINARY,
+            name=f"z_{k}"
+        )
+        for k in K_VALUES
+    }
 
-            # ------------------------------------------------
-            # The 51 pure elements must satisfy:
-            #
-            # BD_pure + RC_pure + K_pure = 51
-            # ------------------------------------------------
+    # --------------------------------------------------------
+    # Select exactly one K_pure
+    # --------------------------------------------------------
 
-            BD_pure = TOTAL_PURE - RC_pure - K_pure
+    model.addConstr(
+        gp.quicksum(z[k] for k in K_VALUES) == 1,
+        name="select_K"
+    )
 
-            # Must be non-negative
-            if BD_pure < 0:
-                continue
+    # K_pure = 3,4,5,6
+    model.addConstr(
+        K_pure ==
+        gp.quicksum(k * z[k] for k in K_VALUES),
+        name="define_K"
+    )
 
-            # ------------------------------------------------
-            # Actual group sizes include 6 shared elements
-            # ------------------------------------------------
+    # --------------------------------------------------------
+    # 51 pure elements
+    #
+    # BD_pure + RC_pure + K_pure = 51
+    # --------------------------------------------------------
 
-            BD = BD_pure + SHARED_PER_GROUP
-            RC = RC_pure + SHARED_PER_GROUP
+    model.addConstr(
+        BD_pure + RC_pure + K_pure == 51,
+        name="pure_elements"
+    )
 
-            # ------------------------------------------------
-            # G(T, K)
-            # ------------------------------------------------
+    # --------------------------------------------------------
+    # X <= 2 * G(T,K) * 3 + 3
+    #
+    # = 6 * G(T,K) + 3
+    #
+    # The binary variables select the appropriate G value.
+    # ----------------------------------------    model.addConstr(
+    model.addConstr(
+        X >= 1,
+        name="X_lower_bound_by_T=1"
+    )
 
-            g = G[T][K]
+    model.addConstr(
+        X <=
+        6 * gp.quicksum(
+            G[T][k + 6] * z[k]
+            for k in K_VALUES
+        ) + 3,
+        name="G_constraint"
+    )
 
-            # ------------------------------------------------
-            # X constraints:
-            #
-            # X <= 6 * G(T,K) + 3
-            #
-            # X <= (RC_pure + 6)/60 * (4T)
-            # ------------------------------------------------
+    # --------------------------------------------------------
+    # X <= (RC_pure + 6)/60 * (4T)
+    # --------------------------------------------------------
 
-            x_g = 6 * g + 3
+    model.addConstr(
+        X <=
+        (4 * T / 60) * (RC_pure + 6),
+        name="RC_constraint"
+    )
+    model.addConstr(
+        X >= 1,
+        name="X_lower_bound_by_T=1"
+    )
+    # --------------------------------------------------------
+    # Objective
+    #
+    # BD = BD_pure + 6
+    #
+    # maximize BD * X / 60
+    # --------------------------------------------------------
 
-            x_rc = ((RC_pure + 6) / 60) * (4 * T)
 
-            # X must be an integer
-            X = math.floor(min(x_g, x_rc))
+    # 5 > X iff G(T,K) < 1
+    low_G = model.addVar(
+        vtype=GRB.BINARY,
+        name="low_G"
+    )
 
-            # ------------------------------------------------
-            # X must be non-negative
-            # ------------------------------------------------
+    if T == 1:
+        model.addConstr(low_G == 1, name="G_below_1")
+    else:
+        model.addConstr(low_G == 0, name="G_not_below_1")
 
-            if X < 0:
-                continue
+    M = 10000
 
-            # ------------------------------------------------
-            # Objective:
-            #
-            # maximize BD * X / 60
-            # ------------------------------------------------
+    model.addConstr(
+        X <= 4 + M * (1 - low_G),
+        name="X_less_than_5_if_G_below_1"
+    )
 
-            objective = BD * X / 60
+    model.addConstr(
+        X >= 5 - M * low_G,
+        name="X_at_least_5_if_G_not_below_1"
+    )
+    BD = BD_pure + 6
 
-            # ------------------------------------------------
-            # Store if this is the best solution so far
-            # ------------------------------------------------
+    model.setObjective(
+        BD * X / 60,
+        GRB.MAXIMIZE
+    )
 
-            if best is None or objective > best["objective"]:
+    # --------------------------------------------------------
+    # Optimize
+    # --------------------------------------------------------
 
-                best = {
-                    "T": T,
-                    "K_pure": K_pure,
-                    "RC_pure": RC_pure,
-                    "BD_pure": BD_pure,
+    model.optimize()
 
-                    "K": K,
-                    "RC": RC,
-                    "BD": BD,
+    # --------------------------------------------------------
+    # Return optimal solution
+    # --------------------------------------------------------
 
-                    "G": g,
+    if model.Status == GRB.OPTIMAL:
 
-                    "X_limit_G": x_g,
-                    "X_limit_RC": x_rc,
+        K_pure_value = round(K_pure.X)
+        RC_pure_value = round(RC_pure.X)
+        X_value = round(X.X)
 
-                    "X": X,
+        K = K_pure_value + 6
+        RC = RC_pure_value + 6
 
-                    "objective": objective
-                }
+        g_value = G[T][K]
 
-    return best
+        return {
+            "T": T,
+
+            "BD_pure": BD_pure,
+            "RC_pure": RC_pure_value,
+            "K_pure": K_pure_value,
+
+            "BD": BD,
+            "RC": RC,
+            "K": K,
+
+            "G": g_value,
+
+            "X": X_value,
+
+            "objective": model.ObjVal,
+
+            "status": "OPTIMAL"
+        }
+
+    else:
+
+        return {
+            "T": T,
+            "BD_pure": BD_pure,
+            "status": model.Status
+        }
 
 
 # ============================================================
-# Optimize for every T
+# Run all models
 # ============================================================
 
-results = []
+all_results = []
 
 for T in T_VALUES:
-    result = optimize_for_T(T)
 
-    if result is not None:
-        results.append(result)
+    for BD_pure in BD_PURE_VALUES:
 
+        result = solve_model(T, BD_pure)
 
-# ============================================================
-# Create results DataFrame
-# ============================================================
-
-df = pd.DataFrame(results)
+        if result["status"] == "OPTIMAL":
+            all_results.append(result)
 
 
 # ============================================================
-# Print T-by-T optimization results
+# All feasible solutions
 # ============================================================
 
-print("\n" + "=" * 110)
+df_all = pd.DataFrame(all_results)
+
+
+# ============================================================
+# BEST RESULT FOR EACH T
+# ============================================================
+
+best_by_T = (
+    df_all
+    .loc[
+        df_all.groupby("T")["objective"].idxmax()
+    ]
+    .sort_values("T")
+    .reset_index(drop=True)
+)
+
+
+# ============================================================
+# BEST RESULT FOR EACH T AND K_pure
+# ============================================================
+
+best_by_T_K = (
+    df_all
+    .loc[
+        df_all.groupby(
+            ["T", "K_pure"]
+        )["objective"].idxmax()
+    ]
+    .sort_values(["T", "K_pure"])
+    .reset_index(drop=True)
+)
+
+
+# ============================================================
+# TABLE 1
+# ============================================================
+
+print("\n")
+print("=" * 110)
 print("BEST SOLUTION FOR EACH T")
 print("=" * 110)
 
 print(
-    df[
+    best_by_T[
         [
             "T",
             "BD_pure",
@@ -199,12 +310,45 @@ print(
 
 
 # ============================================================
-# Overall best solution
+# TABLE 2
 # ============================================================
 
-best_overall = df.loc[df["objective"].idxmax()]
+print("\n")
+print("=" * 110)
+print("BEST SOLUTION FOR EACH T AND K_pure")
+print("=" * 110)
 
-print("\n" + "=" * 110)
+print(
+    best_by_T_K[
+        [
+            "T",
+            "K_pure",
+            "K",
+            "BD_pure",
+            "RC_pure",
+            "BD",
+            "RC",
+            "G",
+            "X",
+            "objective"
+        ]
+    ].to_string(
+        index=False,
+        float_format=lambda x: f"{x:.4f}"
+    )
+)
+
+
+# ============================================================
+# OVERALL BEST
+# ============================================================
+
+overall = df_all.loc[
+    df_all["objective"].idxmax()
+]
+
+print("\n")
+print("=" * 110)
 print("OVERALL BEST")
 print("=" * 110)
 
@@ -220,13 +364,24 @@ for column in [
     "X",
     "objective"
 ]:
-    print(f"{column:15s}: {best_overall[column]}")
+    print(f"{column:15s}: {overall[column]}")
 
 
 # ============================================================
-# Optional: save the T-by-T results to CSV
+# SAVE
 # ============================================================
 
-df.to_csv("T_optimization_results.csv", index=False)
+df_all.to_csv(
+    "all_gurobi_results.csv",
+    index=False
+)
 
-print("\nResults saved to: T_optimization_results.csv")
+best_by_T.to_csv(
+    "best_by_T.csv",
+    index=False
+)
+
+best_by_T_K.to_csv(
+    "best_by_T_K_pure.csv",
+    index=False
+)
