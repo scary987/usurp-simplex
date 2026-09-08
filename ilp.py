@@ -15,7 +15,7 @@ BD_VALUES = range(10, 51)    # BD = 10,...,30
 K_PURE_VALUES = range(3, 7)  # K_pure = 3,...,6
 
 # Maximum number of special pure RC elements
-MAX_RC_WEIGHT_3 = 9
+MAX_RC_WEIGHT_3 = 6
 MAX_RC_WEIGHT_2 = 4
 
 # Weighted contribution from the 6 shared RC elements:
@@ -185,7 +185,7 @@ for T in T_VALUES:
         # ----------------------------------------------------
 
         model.addConstr(
-            BD_pure + RC_pure + K_pure == 51,
+            BD_pure + RC_pure + K_pure == 48,
             name="pure_total"
         )
 
